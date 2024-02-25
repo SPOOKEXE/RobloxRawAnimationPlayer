@@ -14,9 +14,10 @@ task.delay(3, function()
 	AnimTrack.DidLoop:Fire()
 end)
 AnimTrack.DidLoop:Wait()
+
 AnimTrack:Destroy()
 Animator:Destroy()
 
 print('Completed and Destroyed')
-print(Animator)
+print( Animator )
 print( AnimTrack )
