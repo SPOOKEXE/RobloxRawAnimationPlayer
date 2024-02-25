@@ -8,16 +8,19 @@ print(Animator)
 -- animation track test
 local AnimTrack = Animator:LoadAnimation( ReplicatedStorage.StunAnimation )
 print( AnimTrack )
-AnimTrack:Play()
-AnimTrack.Looped = false
-task.delay(3, function()
-	AnimTrack.DidLoop:Fire()
-end)
-AnimTrack.DidLoop:Wait()
 
-AnimTrack:Destroy()
-Animator:Destroy()
+--[[
+	AnimTrack:Play()
+	AnimTrack.Looped = false
+	task.delay(3, function()
+		AnimTrack.DidLoop:Fire()
+	end)
+	AnimTrack.DidLoop:Wait()
 
-print('Completed and Destroyed')
-print( Animator )
-print( AnimTrack )
+	AnimTrack:Destroy()
+	Animator:Destroy()
+
+	print('Completed and Destroyed')
+	print( Animator )
+	print( AnimTrack )
+]]

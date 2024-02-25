@@ -1,5 +1,6 @@
 local HttpService = game:GetService('HttpService')
 local RunService = game:GetService('RunService')
+local TweenService = game:GetService('TweenService')
 
 local EventClassModule = require(script.Event)
 local MaidClassModule = require(script.Maid)
@@ -7,43 +8,19 @@ local MaidClassModule = require(script.Maid)
 export type MaidType = MaidClassModule.MaidType
 export type AnimationType = KeyframeSequence | table
 
-export type Motor6DTransforms = {
-
-	-- [MOTOR6D_NAME] : { ...Motor6DTransform }
-
-	[string] : {
-		{ -- Motor6D transform for Motor6D of Name
-			Time : number,
-			TransformC0 : CFrame?,
-			TransformC1 : CFrame?,
-			Weight : number,
-		}
-	},
-
-}
-
 export type PoseKeyframe = {
 	Parent : string,
 	Weight : number,
 	EasingDirection : Enum.EasingDirection,
 	EasingStyle : Enum.EasingStyle,
-	TransformCFrame : CFrame,
+	Transform : CFrame,
 }
 
 export type PoseKeypointsData = {
 	TimeLength : number,
-	PoseKeypoints : {
-		{
-			Time : number,
-			Keyframes : { [string] : PoseKeyframe },
-		}
-	},
-	MarkerTimestamps : {
-		[string] : { number },
-	},
-	KeyframeTimestamps : {
-		[string] : number, -- for any custom keyframe names
-	}
+	PoseKeypoints : { { Time : number, Keyframes : { [string] : PoseKeyframe }, } },
+	MarkerTimestamps : { [string] : { number }, },
+	KeyframeTimestamps : { [string] : number, }
 }
 
 export type AnimationObjectType = {
@@ -57,12 +34,13 @@ export type AnimationObjectType = {
 	Priority : Enum.AnimationPriority,
 	Speed : number,
 	TimePosition : number,
+	WeightFadeTime : number,
 	WeightCurrent : number,
 	WeightTarget : number,
 	Destroyed : boolean,
 	_Maid : MaidType,
 	_PoseKeypointsData : PoseKeypointsData,
-	_TransformsData : Motor6DTransforms,
+	_MarkerReachedEvents : { [string] : RBXScriptSignal },
 	-- methods
 	AdjustSpeed : (self : AnimationObjectType, speed : number) -> nil,
 	AdjustWeight : (self : AnimationObjectType, weight : number, fadeTime : number?) -> nil,
@@ -140,6 +118,60 @@ local function UpdateBackendObject( backendObject : AnimatorBackendType, deltaTi
 	end
 end
 
+local function KeyframeSequenceToPoseData( KeyframeSequence : KeyframeSequence ) : PoseKeypointsData
+	local KeyframeTimestamps : { [string] : number } = {}
+	local EventMarkerTimestamps : { [string] : {number} } = {}
+
+	local KeyframeObjects : { Keyframe } = { }
+	for _, Keyframe in ipairs( KeyframeSequence:GetChildren() ) do
+		if Keyframe:IsA('Keyframe') then
+			table.insert(KeyframeObjects, Keyframe)
+			KeyframeTimestamps[Keyframe.Name] = Keyframe.Time
+			for _, Object in ipairs( Keyframe:GetChildren() ) do
+				if Object:IsA('KeyframeMarker') then
+					if not EventMarkerTimestamps[Object.Name] then
+						EventMarkerTimestamps[Object.Name] = {}
+					end
+					table.insert(EventMarkerTimestamps[Object.Name], Keyframe.Time)
+				end
+			end
+		end
+	end
+
+	table.sort(KeyframeObjects, function(keyframe0 : Keyframe, keyframe1 : Keyframe)
+		return keyframe0.Time < keyframe1.Time -- sort by time (0 -> TOTAL LENGTH)
+	end)
+
+	-- Compiled Per-Keyframe Pose Data
+	local PoseKeypoints : PoseKeypointsData = {}
+	for _, Keyframe in ipairs( KeyframeObjects ) do
+		local Poses : { Pose } = Keyframe:GetDescendants()
+		local PosesData : { [string] : PoseKeyframe } = {}
+		for _, Pose in ipairs( Poses ) do
+			if Pose:IsA('Pose') then
+				PosesData[Pose.Name] = {
+					Parent = Pose.Parent.Name,
+					Weight = Pose.Weight,
+					EasingDirection = Enum.EasingDirection[Pose.EasingDirection.Name],
+					EasingStyle = Enum.EasingStyle[Pose.EasingStyle.Name],
+					Transform = Pose.CFrame,
+				}
+			end
+		end
+		table.insert( PoseKeypoints, { TimeLength = Keyframe.Time, PoseKeypoints = PosesData })
+	end
+
+	-- Compiled Pose Data
+	local PoseData : PoseKeypointsData = {}
+
+	PoseData.TimeLength = KeyframeObjects[#KeyframeObjects].Time
+	PoseData.KeyframeTimestamps = KeyframeTimestamps
+	PoseData.MarkerTimestamps = EventMarkerTimestamps
+	PoseData.PoseKeypoints = PoseKeypoints -- ALREADY SORTED BY TIME
+
+	return PoseData
+end
+
 -- // AnimationObject Class // --
 local AnimationObject = {}
 AnimationObject.ClassName = 'AnimationObject'
@@ -170,10 +202,11 @@ function AnimationObject.New() : AnimationObjectType
 		TimePosition = 0,
 		WeightCurrent = 1,
 		WeightTarget = 1,
+		WeightFadeTime = 0,
 		Destroyed = false,
 		_Maid = MaidObject,
 		_PoseKeypointsData = nil,
-		_TransformsData = nil,
+		_MarkerReachedEvents = { },
 		-- events
 		DidLoop = DidLoop,
 		Ended = Ended,
@@ -188,73 +221,14 @@ function AnimationObject.New() : AnimationObjectType
 	return self
 end
 
-local function PoseDataToMotor6DTransforms( PoseData  : PoseKeypointsData ) : Motor6DTransforms
-
-end
-
-local function KeyframeSequenceToPoseData( KeyframeSequence : KeyframeSequence ) : PoseKeypointsData
-
-	local KeyframeObjects : { Keyframe } = KeyframeSequence:GetChildren()
-	local KeyframeTimestamps : { [string] : number } = {}
-	local MarkerTimestamps : { [string] : {number} } = {}
-
-	local function AppendMarkerTimestamp(Keyframe, Object)
-		if not MarkerTimestamps[Object.Name] then
-			MarkerTimestamps[Object.Name] = {}
-		end
-		table.insert(MarkerTimestamps[Object.Name], Keyframe.Time)
-	end
-
-	for _, Keyframe in ipairs( KeyframeObjects ) do
-		KeyframeTimestamps[Keyframe.Name] = Keyframe.Time
-		for _, Object in ipairs( Keyframe:GetChildren() ) do
-			if Object:IsA('KeyframeMarker') then
-				AppendMarkerTimestamp(Keyframe, Object)
-			end
-		end
-	end
-
-	table.sort(KeyframeObjects, function(keyframe0 : Keyframe, keyframe1 : Keyframe)
-		return keyframe0.Time < keyframe1.Time -- sort by time (0 -> TOTAL LENGTH)
-	end)
-
-	-- Compiled Per-Keyframe Pose Data
-	local PoseKeypoints = {}
-	for _, Keyframe in ipairs( KeyframeObjects ) do
-		local Poses : { Pose } = Keyframe:GetDescendants()
-		for _, Pose in ipairs( Poses ) do
-			if Pose:IsA('Pose') then
-				PoseKeypoints[Pose.Name] = {
-					Parent = Pose.Parent.Name,
-					Weight = Pose.Weight,
-					EasingDirection = Pose.EasingDirection,
-					EasingStyle = Pose.EasingStyle,
-					TransformCFrame = Pose.CFrame,
-				}
-			end
-		end
-		table.insert( PoseKeypoints, { TimeLength = Keyframe.Time, PoseKeypoints = Poses, })
-	end
-
-	-- Compiled Pose Data
-	local PoseData : PoseKeypointsData = {}
-
-	PoseData.TimeLength = KeyframeObjects[#KeyframeObjects].Time
-	PoseData.KeyframeTimestamps = KeyframeTimestamps
-	PoseData.MarkerTimestamps = MarkerTimestamps
-	PoseData.PoseKeypoints = PoseKeypoints -- ALREADY SORTED BY TIME
-
-	return PoseData
-
-end
-
-function AnimationObject.FromKeyframeSequence( PoseSequenceObject : KeyframeSequence ) : AnimationObjectType
-	local PoseData = KeyframeSequenceToPoseData( PoseSequenceObject )
-	local Transforms = PoseDataToMotor6DTransforms( PoseData )
-
-	local Animation = AnimationObject.New()
+function AnimationObject.FromKeyframeSequence( KeyframeSequence : KeyframeSequence ) : AnimationObjectType
+	local PoseData : PoseKeypointsData = KeyframeSequenceToPoseData( KeyframeSequence )
+	local Animation : AnimationObjectType = AnimationObject.New()
+	Animation.Animation = KeyframeSequence
+	Animation.Priority = KeyframeSequence.Priority
+	Animation.Looped = KeyframeSequence.Loop
+	Animation.Length = PoseData.TimeLength
 	Animation._PoseKeypointsData = PoseData
-	Animation._TransformsData = Transforms
 	return Animation
 end
 
@@ -303,11 +277,23 @@ function AnimationObject:AdjustSpeed(speed : number)
 	self.Speed = speed
 end
 
---[[
-	AdjustWeight : (self : AnimationObjectType, weight : number, fadeTime : number?) -> nil,
-	GetMarkerReachedSignal : (self : AnimationObjectType, name : string) -> RBXScriptSignal,
-	GetTimeOfKeyframe : (self : AnimationObjectType, keyframeName : string) -> number,
-]]
+function AnimationObject:GetTimeOfKeyframe(keyframeName : string) : number
+	return self._PoseKeypointsData and self._PoseKeypointsData.KeyframeTimestamps[keyframeName] or -1
+end
+
+function AnimationObject:AdjustWeight( weight : number, fadeTime : number? )
+	self.WeightFadeTime = fadeTime
+	self.WeightTarget = weight
+end
+
+function AnimationObject:GetMarkerReachedSignal( markerName : string ) : RBXScriptSignal
+	if not self._MarkerReachedEvents[ markerName ] then
+		local Event = EventClassModule.New()
+		self._MarkerReachedEvents[ markerName ] = Event
+		self._Maid:Give(Event)
+	end
+	return self._MarkerReachedEvents[ markerName ]
+end
 
 -- // AnimatorBackend Class // --
 local AnimatorBackend = {}
@@ -374,7 +360,7 @@ function AnimatorBackend:LoadAnimation( animation : AnimationType ) : AnimationO
 		Object = AnimationObject.FromCFrameData( animation )
 	end
 	if not Object then
-		local ERROR_MESSAGE = 'Animation of type %s is unsupported. The supported types are KeyframeSequence Instances and Arrays of CFrameData.'
+		local ERROR_MESSAGE = 'Animation of type %s is unsupported. The only supported type is a KeyframeSequence Instance.'
 		error(string.format(ERROR_MESSAGE, typeof(Object)))
 	end
 	table.insert(self._AnimationTracks, Object)
@@ -398,7 +384,25 @@ function AnimatorBackend:StepAnimations( deltaTime : number )
 	end
 
 	-- handle all animations and transformation to the character here
-	print('Animation Transform Update: ', #self._AnimationTracks)
+	print('Animation Transform Update: ', #self._AnimationTracks, deltaTime)
+
+	-- step weights towards target weight
+	for _, AnimObject in ipairs( self._AnimationTracks ) do
+		local EPSILON = 0.05
+		if math.abs(AnimObject.WeightTarget - AnimObject.WeightCurrent) > EPSILON then
+			AnimObject.WeightCurrent += (AnimObject.WeightTarget - AnimObject.WeightCurrent) * ((1/AnimObject.WeightFadeTime) * deltaTime)
+		else
+			AnimObject.WeightCurrent = AnimObject.WeightTarget
+		end
+	end
+
+	-- TODO:
+	-- step all cframes after masking animations by priority
+
+	-- find the offsets from the joints
+	-- local timeDelta = (currentStamp - startTimeStamp) / (endTimeStamp - startTimeStamp)
+	-- local tweenAlpha = TweenService:GetValue( timeDelta, pose.EasyingStyle, pose.EasyingDirection )
+	-- joint.Transform = pose.StartTransform:Lerp( pose.EndTransform, tweenAlpha )
 
 end
 
