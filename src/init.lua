@@ -1,4 +1,9 @@
+local RunService = game:GetService('RunService')
 
+local EventClassModule = require(script.Event)
+local MaidClassModule = require(script.Maid)
+
+export type MaidType = MaidClassModule.MaidType
 export type AnimationType = KeyframeSequence | table
 
 export type AnimationObjectType = {
@@ -16,6 +21,7 @@ export type AnimationObjectType = {
 	WeightCurrent : number,
 	WeightTarget : number,
 	Destroyed : boolean,
+	_Maid : MaidType,
 	-- methods
 	AdjustSpeed : (self : AnimationObjectType, speed : number) -> nil,
 	AdjustWeight : (self : AnimationObjectType, weight : number, fadeTime : number?) -> nil,
@@ -23,6 +29,8 @@ export type AnimationObjectType = {
 	GetTimeOfKeyframe : (self : AnimationObjectType, keyframeName : string) -> number,
 	Play : (self : AnimationObjectType, fadeTime : number?, weight : number?, speed : number?) -> nil,
 	Stop : (self : AnimationObjectType, fadeTime : number?) -> nil,
+	Pause : (self : AnimationObjectType, fadeTime : number?) -> nil,
+	Resume : (self : AnimationObjectType, fadeTime : number?) -> nil,
 	Destroy : (self : AnimationObjectType) -> nil,
 	-- events
 	DidLoop : RBXScriptSignal,
@@ -30,16 +38,19 @@ export type AnimationObjectType = {
 	KeyframeReached : RBXScriptSignal, -- callback gives keyframeName that is reached (except for 'Default' keyframe)
 	Stopped : RBXScriptSignal,
 	Paused : RBXScriptSignal,
+	Destroying : RBXScriptSignal,
 }
 
 export type AnimatorBackendType = {
-	New : (Character : Model) -> AnimatorBackendType,
+	New : (Humanoid : Humanoid) -> AnimatorBackendType,
 	-- properties
 	Destroyed : boolean,
 	IsUpdating : boolean,
 	Enabled : boolean,
 	Deferred : boolean, -- is the thread task.defer'ed or task.spawn'ed
-	AnimationTracks : { AnimationObjectType },
+	_AnimationTracks : { AnimationObjectType },
+	_Character : Instance,
+	_Maid : MaidType,
 	-- functions
 	GetPlayingAnimationTracks : (self : AnimatorBackendType) -> { AnimationObjectType },
 	LoadAnimation : (self : AnimatorBackendType, animation : AnimationType) -> AnimationObjectType,
@@ -48,27 +59,66 @@ export type AnimatorBackendType = {
 	Enable : (self : AnimatorBackendType) -> nil,
 	Disable : (self : AnimatorBackendType) -> nil,
 	-- events
-	AnimationPlayed : RBXScriptSignal, -- calback gives the AnimationObject of the animation that is now playing
+	AnimationPlayed : RBXScriptSignal,
+	AnimationStopped : RBXScriptSignal,
+	AnimationPaused : RBXScriptSignal,
+	AnimationResumed : RBXScriptSignal,
+	AnimationDestroyed : RBXScriptSignal,
+	Destroying : RBXScriptSignal,
 }
 
-local RunService = game:GetService('RunService')
-
-local ActiveBackends = {}
+local ActiveBackends : { AnimatorBackendType } = {}
 
 -- // AnimationObject Class // --
 local AnimationObject = {}
 AnimationObject.__index = AnimationObject
 
 function AnimationObject.New() : AnimationObjectType
-	local self = {}
+	local DidLoop = EventClassModule.New()
+	local Ended = EventClassModule.New()
+	local KeyframeReached = EventClassModule.New()
+	local Stopped = EventClassModule.New()
+	local Paused = EventClassModule.New()
+	local Destroying = EventClassModule.New()
+
+	local MaidObject = MaidClassModule.New()
+	MaidObject:Give(
+		DidLoop, Ended, KeyframeReached,
+		Stopped, Paused, Destroying
+	)
+
+	local self = {
+		-- properties
+		Animation = nil,
+		IsPlaying = false,
+		Length = 0,
+		Looped  = false,
+		Priority = Enum.AnimationPriority.Core,
+		Speed = 1,
+		TimePosition = 0,
+		WeightCurrent = 1,
+		WeightTarget = 1,
+		Destroyed = false,
+		_Maid = MaidObject,
+		-- events
+		DidLoop = DidLoop,
+		Ended = Ended,
+		KeyframeReached = KeyframeReached,
+		Stopped = Stopped,
+		Paused = Paused,
+		Destroying = Destroying,
+	}
+
 	setmetatable(self, AnimationObject)
+
 	return self
 end
 
 function AnimationObject.FromKeyframeSequence( KeyframeSequenceObject : KeyframeSequence ) : AnimationObjectType
-	error('NotImplementedError')
-	-- local baseObject = AnimationObject.New()
-	-- return baseObject
+	-- error('NotImplementedError')
+	local baseObject = AnimationObject.New()
+
+	return baseObject
 end
 
 function AnimationObject.FromCFrameData( CFrameData : {} ) : AnimationObjectType
@@ -106,22 +156,67 @@ function AnimationObject:Stop()
 end
 
 function AnimationObject:Destroy()
+	if self.Destroyed then
+		return
+	end
+	self.Destroying:Fire()
 	self:Stop()
 	self.Destroyed = true
+	self._Maid:Cleanup()
+	self._Maid = nil
 end
+
+--[[
+	AdjustSpeed : (self : AnimationObjectType, speed : number) -> nil,
+	AdjustWeight : (self : AnimationObjectType, weight : number, fadeTime : number?) -> nil,
+	GetMarkerReachedSignal : (self : AnimationObjectType, name : string) -> RBXScriptSignal,
+	GetTimeOfKeyframe : (self : AnimationObjectType, keyframeName : string) -> number,
+]]
 
 -- // AnimatorBackend Class // --
 local AnimatorBackend = {}
 AnimatorBackend.__index = AnimatorBackend
 
-function AnimatorBackend.New( Character : Model ) : AnimatorBackendType
+function AnimatorBackend.New( Humanoid : Humanoid ) : AnimatorBackendType
+	local AnimationPlayed = EventClassModule.New()
+	local AnimationStopped = EventClassModule.New()
+	local AnimationPaused = EventClassModule.New()
+	local AnimationResumed = EventClassModule.New()
+	local AnimationDestroyed = EventClassModule.New()
+	local Destroying = EventClassModule.New()
+
+	local MaidObject = MaidClassModule.New()
+	MaidObject:Give(
+		AnimationPlayed, AnimationStopped, AnimationPaused,
+		AnimationResumed, AnimationDestroyed, Destroying
+	)
+
 	local self = {
+		-- properties
 		Destroyed = false,
 		IsUpdating = false,
 		Enabled = true,
 		Deferred = true,
-		AnimationTracks = {},
+		_Character = Humanoid.Parent,
+		_AnimationTracks = {},
+		_Maid = MaidObject,
+		-- events
+		AnimationPlayed = AnimationPlayed,
+		AnimationStopped = AnimationStopped,
+		AnimationPaused = AnimationPaused,
+		AnimationResumed = AnimationResumed,
+		AnimationDestroyed = AnimationDestroyed,
+		Destroying = Destroying,
 	}
+
+	MaidObject:Give(function()
+		self.AnimationPlayed = nil
+		self.AnimationStopped = nil
+		self.AnimationPaused = nil
+		self.AnimationResumed = nil
+		self.AnimationDestroyed = nil
+		self.Destroying = nil
+	end)
 
 	setmetatable(self, AnimatorBackend)
 
@@ -139,6 +234,8 @@ function AnimatorBackend:LoadAnimation( animation : AnimationType ) : AnimationO
 		local ERROR_MESSAGE = 'Animation of type %s is unsupported. The supported types are KeyframeSequence Instances and Arrays of CFrameData.'
 		error(string.format(ERROR_MESSAGE, typeof(Object)))
 	end
+	table.insert(self._AnimationTracks, Object)
+	self._Maid:Give(Object)
 	return Object
 end
 
@@ -168,8 +265,38 @@ function AnimatorBackend:Disable()
 end
 
 function AnimatorBackend:Destroy()
-	self:Stop()
+	if self.Destroyed then
+		return
+	end
+	self.Destroying:Fire()
+	self:Disable()
 	self.Destroyed = true
+	if self._Maid then
+		self._Maid:Cleanup()
+		self._Maid = nil
+	end
+end
+
+function AnimatorBackend:GetPlayingAnimationTracks()
+	local Animations = {}
+	for _, Animation in ipairs( self._AnimationTracks ) do
+		if Animation.IsPlaying then
+			table.insert(Animations, Animation)
+		end
+	end
+	return Animations
+end
+
+function AnimatorBackend:PauseAllAnimationTracks()
+	for _, Animation in ipairs( self._AnimationTracks ) do
+		Animation:Pause()
+	end
+end
+
+function AnimatorBackend:StopAllAnimationTracks()
+	for _, Animation in ipairs( self._AnimationTracks ) do
+		Animation:Stop()
+	end
 end
 
 -- // Module // --
@@ -178,14 +305,17 @@ local Module = {}
 Module.AnimationObject = AnimationObject
 Module.AnimatorBackend = AnimatorBackend
 
-function Module.CreateAnimatorForModel( Model : Model ) : AnimatorBackendType
-
+function Module.CreateAnimatorForHumanoid( Humanoid : Humanoid ) : AnimatorBackendType
+	return AnimatorBackend.New( Humanoid )
 end
 
 function Module.Initialize()
 
+	print('Initializing')
+
 	local SteppedEvent = RunService:IsServer() and RunService.Heartbeat or RunService.RenderStepped
 	SteppedEvent:Connect(function(deltaTime : number)
+		print(#ActiveBackends)
 		local index = 1
 		while index <= #ActiveBackends do
 			local backendObject : AnimatorBackendType = ActiveBackends[index]
@@ -203,5 +333,7 @@ function Module.Initialize()
 	end)
 
 end
+
+task.spawn(Module.Initialize)
 
 return Module
