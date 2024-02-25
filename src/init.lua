@@ -131,6 +131,7 @@ end
 
 -- // AnimationObject Class // --
 local AnimationObject = {}
+AnimationObject.ClassName = 'AnimationObject'
 AnimationObject.__index = AnimationObject
 
 function AnimationObject.New() : AnimationObjectType
@@ -175,7 +176,7 @@ function AnimationObject.New() : AnimationObjectType
 	return self
 end
 
-function AnimationObject.FromKeyframeSequence( SequenceObject : KeyframeSequence ) : AnimationObjectType
+function AnimationObject.FromKeyframeSequence( PoseSequenceObject : KeyframeSequence ) : AnimationObjectType
 	local baseObject = AnimationObject.New()
 	-- baseObject._CFrameData = false
 	return baseObject
@@ -226,10 +227,6 @@ function AnimationObject:AdjustSpeed(speed : number)
 	self.Speed = speed
 end
 
-function AnimationObject:GetTimeOfKeyframe(keyframeName : string) : number
-
-end
-
 --[[
 	AdjustWeight : (self : AnimationObjectType, weight : number, fadeTime : number?) -> nil,
 	GetMarkerReachedSignal : (self : AnimationObjectType, name : string) -> RBXScriptSignal,
@@ -238,6 +235,7 @@ end
 
 -- // AnimatorBackend Class // --
 local AnimatorBackend = {}
+AnimatorBackend.ClassName = 'AnimatorBackend'
 AnimatorBackend.__index = AnimatorBackend
 
 function AnimatorBackend.New( Humanoid : Humanoid ) : AnimatorBackendType
@@ -259,7 +257,7 @@ function AnimatorBackend.New( Humanoid : Humanoid ) : AnimatorBackendType
 		UUID = HttpService:GenerateGUID(false),
 		Destroyed = false,
 		IsUpdating = false,
-		Enabled = false,
+		Enabled = true,
 		Deferred = true,
 		_Character = Humanoid.Parent,
 		_JointMapping = {},
@@ -287,7 +285,7 @@ function AnimatorBackend.New( Humanoid : Humanoid ) : AnimatorBackendType
 
 	setmetatable(self, AnimatorBackend)
 
-	self:Enable()
+	table.insert(ActiveBackends, self)
 
 	return self
 end
@@ -315,7 +313,7 @@ function AnimatorBackend:StepAnimations( deltaTime : number )
 
 	-- cleanup destroyed animation tracks
 	local index = 1
-	while index <= self._AnimationTracks do
+	while index <= #self._AnimationTracks do
 		if self._AnimationTracks[index].Destroyed then
 			table.remove(self._AnimationTracks, index)
 		else
@@ -324,7 +322,8 @@ function AnimatorBackend:StepAnimations( deltaTime : number )
 	end
 
 	-- handle all animations and transformation to the character here
-	print(#self.AnimationTracks)
+	print('Animation Transform Update: ', #self._AnimationTracks)
+
 end
 
 function AnimatorBackend:Enable()
@@ -344,7 +343,6 @@ function AnimatorBackend:Disable()
 end
 
 function AnimatorBackend:Destroy()
-	print(debug.traceback())
 	if self.Destroyed then
 		return
 	end

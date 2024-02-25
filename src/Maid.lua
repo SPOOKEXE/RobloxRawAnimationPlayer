@@ -28,18 +28,22 @@ end
 function Maid:Cleanup()
 	self._instances = { }
 	for _, _task in ipairs( self._tasks ) do
-		if typeof(_task) == 'RBXScriptConnection' or (typeof(_task) == 'table' and _task.Disconnect) then
+		if typeof(_task) == 'RBXScriptConnection' then
 			_task:Disconnect()
 		elseif typeof(_task) == 'function' then
 			task.defer(_task)
 		elseif typeof(_task) == 'Instance' then
-			task.defer(function()
+			_task:Destroy()
+		elseif typeof(_task) == 'table' then
+			if _task.ClassName == Maid.ClassName then
+				_task:Cleanup()
+			elseif _task.Disconnect then
+				_task:Disconnect()
+			elseif _task.ClassName == 'AnimationObject' or _task.ClassName == 'AnimatorBackend' or _task.Destroy then
 				_task:Destroy()
-			end)
-		elseif typeof(_task) == 'table' and _task.Destroy then
-			task.defer(_task.Destroy)
-		elseif typeof(_task) == "table" and _task.ClassName == Maid.ClassName then
-			_task:Cleanup()
+			else
+				warn('Invalid task type; ', typeof(_task), _task)
+			end
 		else
 			warn('Invalid task type; ', typeof(_task), _task)
 		end
