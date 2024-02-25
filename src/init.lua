@@ -13,7 +13,7 @@ export type Motor6DTransforms = {
 
 	[string] : {
 		{ -- Motor6D transform for Motor6D of Name
-			Timestamp : number,
+			Time : number,
 			TransformC0 : CFrame?,
 			TransformC1 : CFrame?,
 			Weight : number,
@@ -22,16 +22,27 @@ export type Motor6DTransforms = {
 
 }
 
+export type PoseKeyframe = {
+	Parent : string,
+	Weight : number,
+	EasingDirection : Enum.EasingDirection,
+	EasingStyle : Enum.EasingStyle,
+	TransformCFrame : CFrame,
+}
+
 export type PoseKeypointsData = {
 	TimeLength : number,
 	PoseKeypoints : {
-		Name : string,
-		Parent : string,
-		Timestamp : number,
-		Weight : number,
-		EasingDirection : Enum.EasingDirection,
-		EasingStyle : Enum.EasingStyle,
-		TransformCFrame : CFrame,
+		{
+			Time : number,
+			Keyframes : { [string] : PoseKeyframe },
+		}
+	},
+	MarkerTimestamps : {
+		[string] : { number },
+	},
+	KeyframeTimestamps : {
+		[string] : number, -- for any custom keyframe names
 	}
 }
 
@@ -161,7 +172,8 @@ function AnimationObject.New() : AnimationObjectType
 		WeightTarget = 1,
 		Destroyed = false,
 		_Maid = MaidObject,
-		_CFrameData = nil, -- CALCULATE FROM PARAMETER
+		_PoseKeypointsData = nil,
+		_TransformsData = nil,
 		-- events
 		DidLoop = DidLoop,
 		Ended = Ended,
@@ -176,10 +188,74 @@ function AnimationObject.New() : AnimationObjectType
 	return self
 end
 
+local function PoseDataToMotor6DTransforms( PoseData  : PoseKeypointsData ) : Motor6DTransforms
+
+end
+
+local function KeyframeSequenceToPoseData( KeyframeSequence : KeyframeSequence ) : PoseKeypointsData
+
+	local KeyframeObjects : { Keyframe } = KeyframeSequence:GetChildren()
+	local KeyframeTimestamps : { [string] : number } = {}
+	local MarkerTimestamps : { [string] : {number} } = {}
+
+	local function AppendMarkerTimestamp(Keyframe, Object)
+		if not MarkerTimestamps[Object.Name] then
+			MarkerTimestamps[Object.Name] = {}
+		end
+		table.insert(MarkerTimestamps[Object.Name], Keyframe.Time)
+	end
+
+	for _, Keyframe in ipairs( KeyframeObjects ) do
+		KeyframeTimestamps[Keyframe.Name] = Keyframe.Time
+		for _, Object in ipairs( Keyframe:GetChildren() ) do
+			if Object:IsA('KeyframeMarker') then
+				AppendMarkerTimestamp(Keyframe, Object)
+			end
+		end
+	end
+
+	table.sort(KeyframeObjects, function(keyframe0 : Keyframe, keyframe1 : Keyframe)
+		return keyframe0.Time < keyframe1.Time -- sort by time (0 -> TOTAL LENGTH)
+	end)
+
+	-- Compiled Per-Keyframe Pose Data
+	local PoseKeypoints = {}
+	for _, Keyframe in ipairs( KeyframeObjects ) do
+		local Poses : { Pose } = Keyframe:GetDescendants()
+		for _, Pose in ipairs( Poses ) do
+			if Pose:IsA('Pose') then
+				PoseKeypoints[Pose.Name] = {
+					Parent = Pose.Parent.Name,
+					Weight = Pose.Weight,
+					EasingDirection = Pose.EasingDirection,
+					EasingStyle = Pose.EasingStyle,
+					TransformCFrame = Pose.CFrame,
+				}
+			end
+		end
+		table.insert( PoseKeypoints, { TimeLength = Keyframe.Time, PoseKeypoints = Poses, })
+	end
+
+	-- Compiled Pose Data
+	local PoseData : PoseKeypointsData = {}
+
+	PoseData.TimeLength = KeyframeObjects[#KeyframeObjects].Time
+	PoseData.KeyframeTimestamps = KeyframeTimestamps
+	PoseData.MarkerTimestamps = MarkerTimestamps
+	PoseData.PoseKeypoints = PoseKeypoints -- ALREADY SORTED BY TIME
+
+	return PoseData
+
+end
+
 function AnimationObject.FromKeyframeSequence( PoseSequenceObject : KeyframeSequence ) : AnimationObjectType
-	local baseObject = AnimationObject.New()
-	-- baseObject._CFrameData = false
-	return baseObject
+	local PoseData = KeyframeSequenceToPoseData( PoseSequenceObject )
+	local Transforms = PoseDataToMotor6DTransforms( PoseData )
+
+	local Animation = AnimationObject.New()
+	Animation._PoseKeypointsData = PoseData
+	Animation._TransformsData = Transforms
+	return Animation
 end
 
 function AnimationObject:Play()
@@ -395,7 +471,7 @@ function Module.Initialize()
 
 	local SteppedEvent = RunService:IsServer() and RunService.Heartbeat or RunService.RenderStepped
 	SteppedEvent:Connect(function(deltaTime : number)
-		print(#ActiveBackends)
+		-- print(#ActiveBackends)
 		debug.profilebegin('RawAnimationUpdateCheck')
 		local index = 1
 		while index <= #ActiveBackends do
